@@ -19,6 +19,7 @@ upower_dbus = { git = "https://github.com/pop-os/dbus-settings-bindings" }
 zbus = "5.19"
 futures-lite = "2.6.1"
 logind-zbus = "5"
+async-channel = "2.5"
 
 [dev-dependencies]
 async-io = "2.6"

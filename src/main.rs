@@ -28,9 +28,15 @@ use wayland_protocols_wlr::{
 mod fade_black;
 use fade_black::FadeBlackSurface;
 mod freedesktop_screensaver;
+mod idle_hint;
+#[cfg(test)]
+mod test_peers;
 
 // Delay between screen off and locking
 const LOCK_SCREEN_DELAY: Duration = Duration::from_millis(500);
+// Inactivity after which logind's `IdleHint` says no one is at the computer, as
+// GNOME's default; the screen may stay on far longer, or never go off.
+const IDLE_HINT_TIME: u32 = 5 * 60 * 1000;
 
 #[derive(Debug)]
 enum Event {
@@ -98,10 +104,16 @@ struct State {
     conf: CosmicIdleConfig,
     screen_off_idle_notification: Option<IdleNotification>,
     suspend_idle_notification: Option<IdleNotification>,
+    idle_hint_notification: Option<IdleNotification>,
+    // Idle past `IDLE_HINT_TIME`, and with the screen off for inactivity.
+    idle: bool,
+    screen_off: bool,
     on_battery: bool,
     screensaver_inhibit: bool,
     system_actions: shortcuts::SystemActions,
     loop_handle: calloop::LoopHandle<'static, Self>,
+    // Whether no one is at the computer, for logind's `IdleHint`.
+    idle_hint: async_channel::Sender<bool>,
 }
 
 fn run_command(command: String) {
@@ -140,7 +152,18 @@ impl State {
         });
     }
 
+    fn update_idle_hint(&self) {
+        let _ = self.idle_hint.try_send(self.idle || self.screen_off);
+    }
+
+    fn update_idle(&mut self, is_idle: bool) {
+        self.idle = is_idle;
+        self.update_idle_hint();
+    }
+
     fn update_screen_off_idle(&mut self, is_idle: bool) {
+        self.screen_off = is_idle;
+        self.update_idle_hint();
         for output in &mut self.outputs {
             if is_idle {
                 output.fade_surface = Some(FadeBlackSurface::new(&self.inner, &output.output));
@@ -187,8 +210,16 @@ impl State {
         }
     }
 
-    // If screen off or suspend idle times have changed, recreate idle notifications.
+    // If screen off, suspend or idle hint times have changed, recreate idle notifications.
     fn recreate_notifications(&mut self) {
+        let idle_time = (!self.screensaver_inhibit).then_some(IDLE_HINT_TIME);
+        if self.idle_hint_notification.as_ref().map(|x| x.time) != idle_time {
+            self.idle_hint_notification =
+                idle_time.map(|time| IdleNotification::new(&self.inner, time));
+            // Initially not idle; server sends `resumed` only after `idled`
+            self.update_idle(false);
+        }
+
         let screen_off_time = if self.screensaver_inhibit {
             None
         } else {
@@ -284,6 +315,7 @@ fn main() {
     let system_actions = shortcuts::system_actions(&shortcuts_config);
 
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
+    let (idle_hint, idle_hints) = async_channel::unbounded();
 
     let mut state = State {
         inner: StateInner {
@@ -299,12 +331,16 @@ fn main() {
         },
         screen_off_idle_notification: None,
         suspend_idle_notification: None,
+        idle_hint_notification: None,
+        idle: false,
+        screen_off: false,
         outputs: Vec::new(),
         conf,
         on_battery: false,
         screensaver_inhibit: false,
         system_actions,
         loop_handle: event_loop.handle(),
+        idle_hint,
     };
     globals.contents().with_list(|list| {
         for global in list {
@@ -336,6 +372,17 @@ fn main() {
         .schedule(async move {
             if let Err(err) = receive_battery_task(sender_clone).await {
                 log::error!("Getting battery status from upower: {}", err);
+            }
+        })
+        .unwrap();
+    scheduler
+        .schedule(async move {
+            let followed = match zbus::Connection::system().await {
+                Ok(system) => idle_hint::follow(&system, idle_hints).await,
+                Err(err) => Err(err),
+            };
+            if let Err(err) = followed {
+                log::error!("failed to set the session's idle hint: {}", err);
             }
         })
         .unwrap();
@@ -417,6 +464,13 @@ impl Dispatch<ext_idle_notification_v1::ExtIdleNotificationV1, ()> for State {
             == Some(notification)
         {
             state.update_suspend_idle(is_idle);
+        } else if state
+            .idle_hint_notification
+            .as_ref()
+            .map(|x| &x.notification)
+            == Some(notification)
+        {
+            state.update_idle(is_idle);
         }
     }
 }
