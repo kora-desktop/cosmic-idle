@@ -1,5 +1,5 @@
-// Tells logind when the session goes idle, so its `IdleHint` is true while the
-// screen is off for inactivity. Services read it to know no one is watching.
+// Tells logind when the session goes idle, so its `IdleHint` is true while no one
+// has used the computer for a while. Services read it to know no one is watching.
 
 use futures_lite::{Stream, StreamExt};
 use logind_zbus::{manager::ManagerProxy, session::SessionProxy};
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_hint_follows_the_screen_off_idle_once_per_change() {
+    fn idle_hint_is_set_once_per_change() {
         future::block_on(async {
             let hints = Arc::new(Mutex::new(Vec::new()));
             let session = FakeSession(Arc::clone(&hints));
