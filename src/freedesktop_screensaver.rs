@@ -212,9 +212,10 @@ pub async fn serve(event_sender: EventSender) -> zbus::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_peers::peers;
     use calloop::channel;
     use futures_lite::future;
-    use std::{os::unix::net::UnixStream, time::Duration};
+    use std::time::Duration;
     use zbus::zvariant::OwnedObjectPath;
 
     const SESSION_PATH: &str = "/org/freedesktop/login1/session/_31";
@@ -250,28 +251,6 @@ mod tests {
         fn get_active_time(&self) -> zbus::Result<u32>;
         #[zbus(signal)]
         fn active_changed(&self, active: bool) -> zbus::Result<()>;
-    }
-
-    // A connected pair of peer-to-peer connections; the first serves `objects`.
-    async fn peers(
-        objects: impl FnOnce(
-            zbus::connection::Builder<'static>,
-        ) -> zbus::Result<zbus::connection::Builder<'static>>,
-    ) -> (zbus::Connection, zbus::Connection) {
-        let (server, client) = UnixStream::pair().unwrap();
-        let server = objects(
-            zbus::connection::Builder::async_io_unix_stream(server)
-                .server(zbus::Guid::generate())
-                .unwrap()
-                .p2p(),
-        )
-        .unwrap()
-        .build();
-        let client = zbus::connection::Builder::async_io_unix_stream(client)
-            .p2p()
-            .build();
-        let (server, client) = future::zip(server, client).await;
-        (server.unwrap(), client.unwrap())
     }
 
     async fn logind(locked_hint: bool) -> (zbus::Connection, zbus::Connection) {

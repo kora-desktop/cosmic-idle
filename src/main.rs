@@ -28,6 +28,9 @@ use wayland_protocols_wlr::{
 mod fade_black;
 use fade_black::FadeBlackSurface;
 mod freedesktop_screensaver;
+mod idle_hint;
+#[cfg(test)]
+mod test_peers;
 
 // Delay between screen off and locking
 const LOCK_SCREEN_DELAY: Duration = Duration::from_millis(500);
@@ -102,6 +105,8 @@ struct State {
     screensaver_inhibit: bool,
     system_actions: shortcuts::SystemActions,
     loop_handle: calloop::LoopHandle<'static, Self>,
+    // Whether the screen is off for inactivity, for logind's `IdleHint`.
+    idle_hint: async_channel::Sender<bool>,
 }
 
 fn run_command(command: String) {
@@ -141,6 +146,7 @@ impl State {
     }
 
     fn update_screen_off_idle(&mut self, is_idle: bool) {
+        let _ = self.idle_hint.try_send(is_idle);
         for output in &mut self.outputs {
             if is_idle {
                 output.fade_surface = Some(FadeBlackSurface::new(&self.inner, &output.output));
@@ -284,6 +290,7 @@ fn main() {
     let system_actions = shortcuts::system_actions(&shortcuts_config);
 
     let mut event_loop: EventLoop<State> = EventLoop::try_new().unwrap();
+    let (idle_hint, idle_hints) = async_channel::unbounded();
 
     let mut state = State {
         inner: StateInner {
@@ -305,6 +312,7 @@ fn main() {
         screensaver_inhibit: false,
         system_actions,
         loop_handle: event_loop.handle(),
+        idle_hint,
     };
     globals.contents().with_list(|list| {
         for global in list {
@@ -336,6 +344,17 @@ fn main() {
         .schedule(async move {
             if let Err(err) = receive_battery_task(sender_clone).await {
                 log::error!("Getting battery status from upower: {}", err);
+            }
+        })
+        .unwrap();
+    scheduler
+        .schedule(async move {
+            let followed = match zbus::Connection::system().await {
+                Ok(system) => idle_hint::follow(&system, idle_hints).await,
+                Err(err) => Err(err),
+            };
+            if let Err(err) = followed {
+                log::error!("failed to set the session's idle hint: {}", err);
             }
         })
         .unwrap();
